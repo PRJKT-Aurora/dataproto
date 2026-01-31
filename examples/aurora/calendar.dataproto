@@ -1,0 +1,85 @@
+// DataProto schema for Aurora Calendar
+// This schema generates both wire format (protobuf) and storage format (SQL)
+
+package acos;
+
+// Calendar event entity
+// Maps to: calendar_events table + CalendarEvent proto message
+@table("calendar_events")
+@backends(sqlite, postgres)
+entity CalendarEvent {
+    // Primary key - unique event identifier
+    @pk
+    id: string;
+
+    // Event title (required)
+    @required
+    title: string;
+
+    // Start time as epoch milliseconds
+    @indexed
+    @required
+    start_date: timestamp;
+
+    // End time as epoch milliseconds (optional for all-day events)
+    end_date: timestamp?;
+
+    // Whether this is an all-day event
+    @default(false)
+    is_all_day: bool;
+
+    // Hex color code for the calendar (e.g., "#FF5733")
+    @pattern("^#[0-9A-Fa-f]{6}$")
+    calendar_color: string?;
+
+    // Name of the calendar this event belongs to
+    calendar_name: string?;
+
+    // Event location
+    location: string?;
+
+    // Additional notes
+    @length(max: 5000)
+    notes: string?;
+
+    // Query: Get events in a date range
+    query eventsByDateRange(after: timestamp, before: timestamp) {
+        where start_date >= after AND start_date < before
+        order_by start_date ASC
+    }
+
+    // Query: Get upcoming events
+    query upcomingEvents(limit: int32 = 50) {
+        where start_date >= NOW()
+        order_by start_date ASC
+        limit limit
+    }
+
+    // Query: Get events for a specific calendar
+    query eventsByCalendar(calendarName: string) {
+        where calendar_name = calendarName
+        order_by start_date ASC
+    }
+
+    // Query: Search events by title or notes
+    query searchEvents(term: string) {
+        where title LIKE "%" || term || "%"
+           OR notes LIKE "%" || term || "%"
+        order_by start_date DESC
+    }
+}
+
+// Request/response messages for gRPC
+service CalendarService {
+    // Push events from client (iPhone) to server
+    rpc PushEvents(stream CalendarEvent) returns (PushResult);
+
+    // Get events from server
+    rpc GetEvents(GetEventsRequest) returns (stream CalendarEvent);
+
+    // Delete an event by ID
+    rpc DeleteEvent(DeleteEventRequest) returns (Result);
+
+    // Clear all events (for sync reset)
+    rpc ClearEvents(ClearEventsRequest) returns (Result);
+}

@@ -1,0 +1,237 @@
+(* DataProto Grammar - EBNF Specification *)
+(* Version 1.0 *)
+
+(* ============================================================ *)
+(* Top-Level Structure *)
+(* ============================================================ *)
+
+File            = { Statement } ;
+
+Statement       = PackageDecl
+                | ImportDecl
+                | OptionDecl
+                | EnumDecl
+                | EntityDecl
+                | ServiceDecl
+                ;
+
+(* ============================================================ *)
+(* Package and Import *)
+(* ============================================================ *)
+
+PackageDecl     = "package" PackageName ";" ;
+
+PackageName     = Identifier { "." Identifier } ;
+
+ImportDecl      = "import" StringLiteral ";" ;
+
+OptionDecl      = "option" Identifier "=" OptionValue ";" ;
+
+OptionValue     = StringLiteral | Number | Boolean | Identifier ;
+
+(* ============================================================ *)
+(* Enum Declaration *)
+(* ============================================================ *)
+
+EnumDecl        = "enum" Identifier "{" { EnumField } "}" ;
+
+EnumField       = Identifier "=" IntLiteral ";" ;
+
+(* ============================================================ *)
+(* Entity Declaration *)
+(* ============================================================ *)
+
+EntityDecl      = { Annotation } "entity" Identifier "{" { EntityMember } "}" ;
+
+EntityMember    = FieldDecl | QueryDecl ;
+
+FieldDecl       = { Annotation } Identifier ":" Type ";" ;
+
+Type            = BaseType [ "?" ] ;
+
+BaseType        = "string"
+                | "int32"
+                | "int64"
+                | "float"
+                | "double"
+                | "bool"
+                | "bytes"
+                | "timestamp"
+                | Identifier    (* Reference to enum or other entity *)
+                ;
+
+(* ============================================================ *)
+(* Query Declaration *)
+(* ============================================================ *)
+
+QueryDecl       = "query" Identifier "(" [ QueryParams ] ")" "{" QueryBody "}" ;
+
+QueryParams     = QueryParam { "," QueryParam } ;
+
+QueryParam      = Identifier ":" Type [ "=" Literal ] ;
+
+QueryBody       = [ WhereClause ] [ OrderByClause ] [ LimitClause ] ;
+
+WhereClause     = "where" Expression ;
+
+OrderByClause   = "order_by" OrderByField { "," OrderByField } ;
+
+OrderByField    = Identifier [ "ASC" | "DESC" ] ;
+
+LimitClause     = "limit" ( IntLiteral | Identifier ) ;
+
+(* ============================================================ *)
+(* Expression (for WHERE clauses) *)
+(* ============================================================ *)
+
+Expression      = OrExpr ;
+
+OrExpr          = AndExpr { "OR" AndExpr } ;
+
+AndExpr         = CompareExpr { "AND" CompareExpr } ;
+
+CompareExpr     = AddExpr [ CompareOp AddExpr ] ;
+
+CompareOp       = "=" | "!=" | "<" | "<=" | ">" | ">="
+                | "LIKE" | "IN" | "IS" [ "NOT" ] "NULL"
+                ;
+
+AddExpr         = MulExpr { ( "+" | "-" | "||" ) MulExpr } ;
+
+MulExpr         = UnaryExpr { ( "*" | "/" | "%" ) UnaryExpr } ;
+
+UnaryExpr       = [ "NOT" | "-" ] PrimaryExpr ;
+
+PrimaryExpr     = Literal
+                | Identifier
+                | FunctionCall
+                | "(" Expression ")"
+                ;
+
+FunctionCall    = Identifier "(" [ ExprList ] ")" ;
+
+ExprList        = Expression { "," Expression } ;
+
+(* ============================================================ *)
+(* Annotations *)
+(* ============================================================ *)
+
+Annotation      = "@" AnnotationName [ "(" AnnotationArgs ")" ] ;
+
+AnnotationName  = Identifier ;
+
+AnnotationArgs  = AnnotationArg { "," AnnotationArg } ;
+
+AnnotationArg   = Literal
+                | Identifier
+                | Identifier "=" AnnotationValue
+                ;
+
+AnnotationValue = Literal | Identifier | AnnotationList ;
+
+AnnotationList  = "[" [ AnnotationValue { "," AnnotationValue } ] "]" ;
+
+(* ============================================================ *)
+(* Service Declaration *)
+(* ============================================================ *)
+
+ServiceDecl     = "service" Identifier "{" { RpcDecl } "}" ;
+
+RpcDecl         = "rpc" Identifier "(" RpcType ")" "returns" "(" RpcType ")" ";" ;
+
+RpcType         = [ "stream" ] Identifier ;
+
+(* ============================================================ *)
+(* Literals *)
+(* ============================================================ *)
+
+Literal         = StringLiteral
+                | IntLiteral
+                | FloatLiteral
+                | Boolean
+                ;
+
+StringLiteral   = '"' { StringChar } '"' ;
+
+StringChar      = ? any character except '"' and '\' ?
+                | EscapeSeq
+                ;
+
+EscapeSeq       = '\' ( '"' | '\' | 'n' | 'r' | 't' | 'x' HexDigit HexDigit ) ;
+
+IntLiteral      = [ "-" ] Digits ;
+
+FloatLiteral    = [ "-" ] Digits "." Digits [ Exponent ] ;
+
+Exponent        = ( "e" | "E" ) [ "+" | "-" ] Digits ;
+
+Boolean         = "true" | "false" ;
+
+Number          = IntLiteral | FloatLiteral ;
+
+Digits          = Digit { Digit } ;
+
+Digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+
+HexDigit        = Digit | "a" | "b" | "c" | "d" | "e" | "f"
+                        | "A" | "B" | "C" | "D" | "E" | "F" ;
+
+(* ============================================================ *)
+(* Identifiers *)
+(* ============================================================ *)
+
+Identifier      = Letter { Letter | Digit | "_" } ;
+
+Letter          = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j"
+                | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t"
+                | "u" | "v" | "w" | "x" | "y" | "z"
+                | "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J"
+                | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T"
+                | "U" | "V" | "W" | "X" | "Y" | "Z"
+                ;
+
+(* ============================================================ *)
+(* Whitespace and Comments *)
+(* ============================================================ *)
+
+Whitespace      = " " | "\t" | "\n" | "\r" ;
+
+Comment         = LineComment | BlockComment ;
+
+LineComment     = "//" { ? any character except newline ? } ;
+
+BlockComment    = "/*" { ? any character ? } "*/" ;
+
+(* ============================================================ *)
+(* Reserved Keywords *)
+(* ============================================================ *)
+
+(* The following are reserved keywords:
+   package, import, option, enum, entity, query, service, rpc,
+   returns, stream, where, order_by, limit, ASC, DESC,
+   AND, OR, NOT, IN, LIKE, IS, NULL,
+   true, false,
+   string, int32, int64, float, double, bool, bytes, timestamp
+*)
+
+(* ============================================================ *)
+(* Annotation Reference *)
+(* ============================================================ *)
+
+(* Entity-level annotations:
+   @table("table_name")           - SQL table name
+   @backends(sqlite, postgres, ceramic)  - Target backends
+
+   Field-level annotations:
+   @pk                            - Primary key
+   @required                      - NOT NULL constraint
+   @indexed                       - Create index on field
+   @unique                        - Unique constraint
+   @default(value)                - Default value
+   @length(min, max)              - String length (min optional)
+   @length(max: n)                - Max length only
+   @pattern("regex")              - Regex validation
+   @range(min, max)               - Numeric range
+   @fk(Entity.field)              - Foreign key reference
+   @ondelete(cascade|setnull|restrict) - FK delete behavior
+*)

@@ -1,0 +1,90 @@
+// DataProto schema for Aurora Reminders
+// This schema generates both wire format (protobuf) and storage format (SQL)
+
+package acos;
+
+// Reminder entity
+// Maps to: reminders table + Reminder proto message
+@table("reminders")
+@backends(sqlite, postgres)
+entity Reminder {
+    // Primary key - unique reminder identifier
+    @pk
+    id: string;
+
+    // Reminder title (required)
+    @required
+    title: string;
+
+    // Due date as epoch milliseconds (optional)
+    @indexed
+    due_date: timestamp?;
+
+    // Completion status
+    @default(false)
+    is_completed: bool;
+
+    // Priority level (0 = none, 1 = low, 2 = medium, 3 = high)
+    @range(0, 3)
+    @default(0)
+    priority: int32;
+
+    // Name of the reminder list this belongs to
+    list_name: string?;
+
+    // Additional notes
+    @length(max: 5000)
+    notes: string?;
+
+    // Query: Get incomplete reminders due before a date
+    query dueReminders(before: timestamp) {
+        where is_completed = false AND due_date IS NOT NULL AND due_date < before
+        order_by due_date ASC
+    }
+
+    // Query: Get all incomplete reminders
+    query incompleteReminders(limit: int32 = 100) {
+        where is_completed = false
+        order_by priority DESC, due_date ASC
+        limit limit
+    }
+
+    // Query: Get reminders by list
+    query remindersByList(listName: string) {
+        where list_name = listName
+        order_by is_completed ASC, priority DESC, due_date ASC
+    }
+
+    // Query: Get today's reminders
+    query todayReminders(startOfDay: timestamp, endOfDay: timestamp) {
+        where is_completed = false
+          AND due_date >= startOfDay
+          AND due_date < endOfDay
+        order_by due_date ASC
+    }
+
+    // Query: Search reminders
+    query searchReminders(term: string) {
+        where title LIKE "%" || term || "%"
+           OR notes LIKE "%" || term || "%"
+        order_by due_date ASC
+    }
+}
+
+// gRPC service
+service RemindersService {
+    // Push reminders from client (iPhone) to server
+    rpc PushReminders(stream Reminder) returns (PushResult);
+
+    // Get reminders from server
+    rpc GetReminders(GetRemindersRequest) returns (stream Reminder);
+
+    // Delete a reminder by ID
+    rpc DeleteReminder(DeleteReminderRequest) returns (Result);
+
+    // Mark reminder as complete
+    rpc CompleteReminder(CompleteReminderRequest) returns (Result);
+
+    // Clear all reminders (for sync reset)
+    rpc ClearReminders(ClearRemindersRequest) returns (Result);
+}

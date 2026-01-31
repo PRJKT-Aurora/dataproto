@@ -1,0 +1,47 @@
+# Binaries
+dataprotoc
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build output
+/compiler/bin/
+/compiler/dataprotoc
+
+# Test output
+*.test
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated output (for testing)
+/tmp/
+/output/
+
+# Go
+/compiler/vendor/
+
+# Java runtime build
+/runtime/java/target/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# Certificates (sensitive)
+/certification/ca/keys/
+*.pem
+*.key

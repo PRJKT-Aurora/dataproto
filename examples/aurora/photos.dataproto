@@ -1,0 +1,103 @@
+// DataProto schema for Aurora Photos
+// This schema generates both wire format (protobuf) and storage format (SQL)
+
+package acos;
+
+// Media type enum
+enum MediaType {
+    UNKNOWN = 0;
+    IMAGE = 1;
+    VIDEO = 2;
+    LIVE_PHOTO = 3;
+}
+
+// Photo metadata entity
+// Maps to: photos table + PhotoMetadata proto message
+// Note: Actual photo bytes are stored separately, this is metadata only
+@table("photos")
+@backends(sqlite, postgres)
+entity PhotoMetadata {
+    // Primary key - local identifier from iOS Photos library
+    @pk
+    local_identifier: string;
+
+    // Creation date as epoch milliseconds
+    @indexed
+    created_date: timestamp?;
+
+    // Image dimensions
+    width: int32?;
+    height: int32?;
+
+    // Whether the photo is marked as favorite
+    @default(false)
+    is_favorite: bool;
+
+    // Media type
+    media_type: MediaType;
+
+    // Optional location data
+    latitude: double?;
+    longitude: double?;
+
+    // File size in bytes
+    file_size: int64?;
+
+    // Query: Get photos by date range
+    query photosByDateRange(after: timestamp, before: timestamp) {
+        where created_date >= after AND created_date < before
+        order_by created_date DESC
+    }
+
+    // Query: Get favorite photos
+    query favorites(limit: int32 = 100) {
+        where is_favorite = true
+        order_by created_date DESC
+        limit limit
+    }
+
+    // Query: Get recent photos
+    query recentPhotos(limit: int32 = 50) {
+        where created_date IS NOT NULL
+        order_by created_date DESC
+        limit limit
+    }
+
+    // Query: Get photos by media type
+    query photosByType(mediaType: MediaType) {
+        where media_type = mediaType
+        order_by created_date DESC
+    }
+
+    // Query: Get photos near a location
+    query photosNearLocation(lat: double, lon: double, radiusDegrees: double) {
+        where latitude IS NOT NULL
+          AND longitude IS NOT NULL
+          AND latitude >= lat - radiusDegrees
+          AND latitude <= lat + radiusDegrees
+          AND longitude >= lon - radiusDegrees
+          AND longitude <= lon + radiusDegrees
+        order_by created_date DESC
+    }
+}
+
+// gRPC service
+service PhotosService {
+    // Upload a photo (metadata + bytes)
+    rpc UploadPhoto(stream PhotoUploadChunk) returns (UploadResult);
+
+    // Get photo metadata
+    rpc GetPhotoMetadata(GetPhotoRequest) returns (PhotoMetadata);
+
+    // Get photo bytes
+    rpc GetPhotoBytes(GetPhotoRequest) returns (stream PhotoBytesChunk);
+
+    // Delete a photo
+    rpc DeletePhoto(DeletePhotoRequest) returns (Result);
+
+    // Sync photo metadata (without bytes)
+    rpc SyncMetadata(stream PhotoMetadata) returns (SyncResult);
+
+    // Get all metadata for display
+    rpc ListPhotos(ListPhotosRequest) returns (stream PhotoMetadata);
+}
