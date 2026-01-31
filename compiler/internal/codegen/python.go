@@ -363,12 +363,18 @@ func (g *PythonGenerator) generatePythonQueryMethod(entity *parser.EntityDecl, q
 	sb.WriteString(fmt.Sprintf(") -> List[%s]:\n", entity.Name))
 	sb.WriteString(fmt.Sprintf("        \"\"\"Query: %s\"\"\"\n", query.Name))
 
+	// Build set of known parameter names
+	knownParams := make(map[string]bool)
+	for _, p := range query.Params {
+		knownParams[p.Name] = true
+	}
+
 	// Build SQL
 	var sqlParts []string
 	sqlParts = append(sqlParts, fmt.Sprintf("SELECT * FROM %s", tableName))
 
 	if query.Where != nil {
-		whereSQL, _ := ExprToSQLWithParams(query.Where, "")
+		whereSQL, _ := ExprToSQLWithKnownParams(query.Where, knownParams)
 		sqlParts = append(sqlParts, "WHERE "+whereSQL)
 	}
 

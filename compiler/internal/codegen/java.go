@@ -278,13 +278,19 @@ func (g *JavaGenerator) generateQueryMethod(entity *parser.EntityDecl, query *pa
 	sb.WriteString(strings.Join(params, ", "))
 	sb.WriteString(") {\n")
 
+	// Build set of known parameter names
+	knownParams := make(map[string]bool)
+	for _, p := range query.Params {
+		knownParams[p.Name] = true
+	}
+
 	// Build SQL
 	var sqlParts []string
 	sqlParts = append(sqlParts, fmt.Sprintf("SELECT * FROM %s", tableName))
 
 	// WHERE clause
 	if query.Where != nil {
-		whereSQL, paramNames := ExprToSQLWithParams(query.Where, "")
+		whereSQL, paramNames := ExprToSQLWithKnownParams(query.Where, knownParams)
 		sqlParts = append(sqlParts, "WHERE "+whereSQL)
 		_ = paramNames // Used for parameter binding order
 	}

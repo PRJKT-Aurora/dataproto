@@ -1,0 +1,567 @@
+package codegen
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/aurora/dataproto/internal/parser"
+)
+
+// MongoDBGenerator generates MongoDB schema and code from DataProto schemas.
+type MongoDBGenerator struct {
+	// DatabaseName is the MongoDB database name
+	DatabaseName string
+	// GenerateJSONSchema generates JSON Schema for validation
+	GenerateJSONSchema bool
+	// GenerateIndexes generates index creation commands
+	GenerateIndexes bool
+}
+
+// NewMongoDBGenerator creates a new MongoDBGenerator with defaults.
+func NewMongoDBGenerator() *MongoDBGenerator {
+	return &MongoDBGenerator{
+		GenerateJSONSchema: true,
+		GenerateIndexes:    true,
+	}
+}
+
+// Generate generates MongoDB schema and setup code from a DataProto file.
+func (g *MongoDBGenerator) Generate(file *parser.File) (map[string]string, error) {
+	result := make(map[string]string)
+
+	// Set database name from package
+	if file.Package != nil && g.DatabaseName == "" {
+		g.DatabaseName = file.Package.Name
+	}
+
+	// Generate JSON Schema for each entity
+	if g.GenerateJSONSchema {
+		for _, entity := range file.Entities {
+			schema := g.generateJSONSchema(entity)
+			filename := ToSnakeCase(entity.Name) + "_schema.json"
+			result[filename] = schema
+		}
+	}
+
+	// Generate setup script (JavaScript for mongo shell)
+	setupScript := g.generateSetupScript(file)
+	result["setup.js"] = setupScript
+
+	// Generate Python repository
+	pythonRepo := g.generatePythonRepository(file)
+	result["repositories.py"] = pythonRepo
+
+	return result, nil
+}
+
+func (g *MongoDBGenerator) generateJSONSchema(entity *parser.EntityDecl) string {
+	var sb strings.Builder
+
+	sb.WriteString("{\n")
+	sb.WriteString("  \"$jsonSchema\": {\n")
+	sb.WriteString("    \"bsonType\": \"object\",\n")
+	sb.WriteString(fmt.Sprintf("    \"title\": \"%s\",\n", entity.Name))
+	sb.WriteString("    \"required\": [")
+
+	// Collect required fields
+	var required []string
+	for _, field := range entity.Fields {
+		if !field.Type.Optional && (field.IsPrimaryKey() || field.IsRequired()) {
+			required = append(required, ToSnakeCase(field.Name))
+		}
+	}
+	for i, r := range required {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("\"%s\"", r))
+	}
+	sb.WriteString("],\n")
+
+	sb.WriteString("    \"properties\": {\n")
+
+	// Generate property schemas
+	for i, field := range entity.Fields {
+		if i > 0 {
+			sb.WriteString(",\n")
+		}
+		sb.WriteString(g.generateFieldSchema(field))
+	}
+
+	sb.WriteString("\n    }\n")
+	sb.WriteString("  }\n")
+	sb.WriteString("}\n")
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generateFieldSchema(field *parser.FieldDecl) string {
+	var sb strings.Builder
+	fieldName := ToSnakeCase(field.Name)
+	bsonType := g.bsonType(field.Type.Name)
+
+	sb.WriteString(fmt.Sprintf("      \"%s\": {\n", fieldName))
+	sb.WriteString(fmt.Sprintf("        \"bsonType\": \"%s\"", bsonType))
+
+	// Add description for primary key
+	if field.IsPrimaryKey() {
+		sb.WriteString(",\n        \"description\": \"Primary key\"")
+	}
+
+	// Add constraints
+	if lenAnno := field.GetAnnotation("length"); lenAnno != nil {
+		if len(lenAnno.Args) > 0 {
+			if min, ok := lenAnno.Args[0].Value.(int64); ok {
+				sb.WriteString(fmt.Sprintf(",\n        \"minLength\": %d", min))
+			}
+		}
+		if len(lenAnno.Args) > 1 {
+			if max, ok := lenAnno.Args[1].Value.(int64); ok {
+				sb.WriteString(fmt.Sprintf(",\n        \"maxLength\": %d", max))
+			}
+		}
+		// Handle @length(max: N) syntax
+		for _, arg := range lenAnno.Args {
+			if arg.Name == "max" {
+				if max, ok := arg.Value.(int64); ok {
+					sb.WriteString(fmt.Sprintf(",\n        \"maxLength\": %d", max))
+				}
+			}
+			if arg.Name == "min" {
+				if min, ok := arg.Value.(int64); ok {
+					sb.WriteString(fmt.Sprintf(",\n        \"minLength\": %d", min))
+				}
+			}
+		}
+	}
+
+	if patternAnno := field.GetAnnotation("pattern"); patternAnno != nil && len(patternAnno.Args) > 0 {
+		if pattern, ok := patternAnno.Args[0].Value.(string); ok {
+			sb.WriteString(fmt.Sprintf(",\n        \"pattern\": \"%s\"", escapeJSONString(pattern)))
+		}
+	}
+
+	if rangeAnno := field.GetAnnotation("range"); rangeAnno != nil {
+		if len(rangeAnno.Args) >= 2 {
+			if min, ok := rangeAnno.Args[0].Value.(int64); ok {
+				sb.WriteString(fmt.Sprintf(",\n        \"minimum\": %d", min))
+			}
+			if max, ok := rangeAnno.Args[1].Value.(int64); ok {
+				sb.WriteString(fmt.Sprintf(",\n        \"maximum\": %d", max))
+			}
+		}
+	}
+
+	sb.WriteString("\n      }")
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) bsonType(typeName string) string {
+	switch typeName {
+	case "string":
+		return "string"
+	case "int32":
+		return "int"
+	case "int64", "timestamp":
+		return "long"
+	case "float":
+		return "double"
+	case "double":
+		return "double"
+	case "bool":
+		return "bool"
+	case "bytes":
+		return "binData"
+	default:
+		return "string"
+	}
+}
+
+func (g *MongoDBGenerator) generateSetupScript(file *parser.File) string {
+	var sb strings.Builder
+
+	sb.WriteString("// Code generated by dataprotoc. DO NOT EDIT.\n")
+	sb.WriteString("// MongoDB setup script - run with: mongosh < setup.js\n\n")
+
+	dbName := g.DatabaseName
+	if dbName == "" {
+		dbName = "dataproto"
+	}
+	sb.WriteString(fmt.Sprintf("use('%s');\n\n", dbName))
+
+	for _, entity := range file.Entities {
+		collectionName := ToSnakeCase(entity.Name)
+		tableName := entity.TableName()
+		if tableName != "" {
+			collectionName = tableName
+		}
+
+		// Create collection with schema validation
+		sb.WriteString(fmt.Sprintf("// Collection: %s\n", collectionName))
+		sb.WriteString(fmt.Sprintf("db.createCollection('%s', {\n", collectionName))
+		sb.WriteString("  validator: ")
+		sb.WriteString(g.generateInlineJSONSchema(entity))
+		sb.WriteString(",\n  validationLevel: 'strict',\n")
+		sb.WriteString("  validationAction: 'error'\n")
+		sb.WriteString("});\n\n")
+
+		// Create indexes
+		if g.GenerateIndexes {
+			// Primary key index (unique)
+			for _, field := range entity.Fields {
+				if field.IsPrimaryKey() {
+					sb.WriteString(fmt.Sprintf("db.%s.createIndex({ %s: 1 }, { unique: true });\n",
+						collectionName, ToSnakeCase(field.Name)))
+				}
+			}
+
+			// Other indexes
+			for _, field := range entity.Fields {
+				if field.IsIndexed() && !field.IsPrimaryKey() {
+					sb.WriteString(fmt.Sprintf("db.%s.createIndex({ %s: 1 });\n",
+						collectionName, ToSnakeCase(field.Name)))
+				}
+				if field.IsUnique() && !field.IsPrimaryKey() {
+					sb.WriteString(fmt.Sprintf("db.%s.createIndex({ %s: 1 }, { unique: true });\n",
+						collectionName, ToSnakeCase(field.Name)))
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	sb.WriteString("print('Setup complete.');\n")
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generateInlineJSONSchema(entity *parser.EntityDecl) string {
+	var sb strings.Builder
+
+	sb.WriteString("{\n")
+	sb.WriteString("    $jsonSchema: {\n")
+	sb.WriteString("      bsonType: 'object',\n")
+	sb.WriteString("      required: [")
+
+	var required []string
+	for _, field := range entity.Fields {
+		if !field.Type.Optional && (field.IsPrimaryKey() || field.IsRequired()) {
+			required = append(required, fmt.Sprintf("'%s'", ToSnakeCase(field.Name)))
+		}
+	}
+	sb.WriteString(strings.Join(required, ", "))
+	sb.WriteString("],\n")
+
+	sb.WriteString("      properties: {\n")
+
+	for i, field := range entity.Fields {
+		if i > 0 {
+			sb.WriteString(",\n")
+		}
+		fieldName := ToSnakeCase(field.Name)
+		bsonType := g.bsonType(field.Type.Name)
+		sb.WriteString(fmt.Sprintf("        %s: { bsonType: '%s' }", fieldName, bsonType))
+	}
+
+	sb.WriteString("\n      }\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("  }")
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generatePythonRepository(file *parser.File) string {
+	var sb strings.Builder
+
+	sb.WriteString("# Code generated by dataprotoc. DO NOT EDIT.\n\n")
+	sb.WriteString("from typing import Optional, List, Dict, Any\n")
+	sb.WriteString("from dataclasses import dataclass, asdict\n")
+	sb.WriteString("from pymongo import MongoClient\n")
+	sb.WriteString("from pymongo.collection import Collection\n")
+	sb.WriteString("from bson import ObjectId\n\n")
+
+	// Generate dataclasses
+	for _, entity := range file.Entities {
+		sb.WriteString(g.generatePythonDataclass(entity))
+		sb.WriteString("\n")
+	}
+
+	// Generate repositories
+	for _, entity := range file.Entities {
+		sb.WriteString(g.generatePythonRepoClass(entity))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generatePythonDataclass(entity *parser.EntityDecl) string {
+	var sb strings.Builder
+
+	sb.WriteString("@dataclass\n")
+	sb.WriteString(fmt.Sprintf("class %s:\n", entity.Name))
+	sb.WriteString(fmt.Sprintf("    \"\"\"Entity for collection '%s'.\"\"\"\n\n",
+		entity.TableName()))
+
+	for _, field := range entity.Fields {
+		pyType := g.pythonType(field.Type.Name)
+		fieldName := ToSnakeCase(field.Name)
+
+		if field.Type.Optional {
+			pyType = fmt.Sprintf("Optional[%s]", pyType)
+			sb.WriteString(fmt.Sprintf("    %s: %s = None\n", fieldName, pyType))
+		} else if def := field.GetAnnotation("default"); def != nil && len(def.Args) > 0 {
+			defaultVal := g.pythonDefaultValue(def.Args[0].Value)
+			sb.WriteString(fmt.Sprintf("    %s: %s = %s\n", fieldName, pyType, defaultVal))
+		} else {
+			sb.WriteString(fmt.Sprintf("    %s: %s\n", fieldName, pyType))
+		}
+	}
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generatePythonRepoClass(entity *parser.EntityDecl) string {
+	var sb strings.Builder
+
+	collectionName := entity.TableName()
+	if collectionName == "" {
+		collectionName = ToSnakeCase(entity.Name)
+	}
+
+	// Find primary key
+	var pkField *parser.FieldDecl
+	for _, f := range entity.Fields {
+		if f.IsPrimaryKey() {
+			pkField = f
+			break
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("class %sRepository:\n", entity.Name))
+	sb.WriteString(fmt.Sprintf("    \"\"\"Repository for %s collection.\"\"\"\n\n", collectionName))
+
+	// Constructor
+	sb.WriteString("    def __init__(self, db):\n")
+	sb.WriteString(fmt.Sprintf("        self.collection: Collection = db['%s']\n\n", collectionName))
+
+	// Upsert
+	sb.WriteString(fmt.Sprintf("    def upsert(self, entity: %s) -> None:\n", entity.Name))
+	sb.WriteString("        doc = asdict(entity)\n")
+	if pkField != nil {
+		pkName := ToSnakeCase(pkField.Name)
+		sb.WriteString(fmt.Sprintf("        self.collection.update_one(\n"))
+		sb.WriteString(fmt.Sprintf("            {'%s': entity.%s},\n", pkName, pkName))
+		sb.WriteString("            {'$set': doc},\n")
+		sb.WriteString("            upsert=True\n")
+		sb.WriteString("        )\n\n")
+	} else {
+		sb.WriteString("        self.collection.insert_one(doc)\n\n")
+	}
+
+	// Find by ID
+	if pkField != nil {
+		pkName := ToSnakeCase(pkField.Name)
+		pkType := g.pythonType(pkField.Type.Name)
+		sb.WriteString(fmt.Sprintf("    def find_by_id(self, %s: %s) -> Optional[%s]:\n",
+			pkName, pkType, entity.Name))
+		sb.WriteString(fmt.Sprintf("        doc = self.collection.find_one({'%s': %s})\n", pkName, pkName))
+		sb.WriteString("        if doc:\n")
+		sb.WriteString("            doc.pop('_id', None)\n")
+		sb.WriteString(fmt.Sprintf("            return %s(**doc)\n", entity.Name))
+		sb.WriteString("        return None\n\n")
+	}
+
+	// Find all
+	sb.WriteString(fmt.Sprintf("    def find_all(self) -> List[%s]:\n", entity.Name))
+	sb.WriteString("        results = []\n")
+	sb.WriteString("        for doc in self.collection.find():\n")
+	sb.WriteString("            doc.pop('_id', None)\n")
+	sb.WriteString(fmt.Sprintf("            results.append(%s(**doc))\n", entity.Name))
+	sb.WriteString("        return results\n\n")
+
+	// Delete
+	if pkField != nil {
+		pkName := ToSnakeCase(pkField.Name)
+		pkType := g.pythonType(pkField.Type.Name)
+		sb.WriteString(fmt.Sprintf("    def delete(self, %s: %s) -> bool:\n", pkName, pkType))
+		sb.WriteString(fmt.Sprintf("        result = self.collection.delete_one({'%s': %s})\n", pkName, pkName))
+		sb.WriteString("        return result.deleted_count > 0\n\n")
+	}
+
+	// Generate query methods
+	for _, query := range entity.Queries {
+		sb.WriteString(g.generatePythonQueryMethod(entity, query, collectionName))
+	}
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generatePythonQueryMethod(entity *parser.EntityDecl, query *parser.QueryDecl, collectionName string) string {
+	var sb strings.Builder
+
+	// Method signature
+	sb.WriteString(fmt.Sprintf("    def %s(self", ToSnakeCase(query.Name)))
+
+	for _, p := range query.Params {
+		pyType := g.pythonType(p.Type.Name)
+		if p.Default != nil {
+			sb.WriteString(fmt.Sprintf(", %s: %s = %s",
+				ToSnakeCase(p.Name), pyType, g.pythonDefaultValue(p.Default)))
+		} else {
+			sb.WriteString(fmt.Sprintf(", %s: %s", ToSnakeCase(p.Name), pyType))
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf(") -> List[%s]:\n", entity.Name))
+
+	// Build MongoDB query filter from WHERE clause
+	sb.WriteString("        query_filter = {}\n")
+	if query.Where != nil {
+		sb.WriteString(g.generateMongoQueryFilter(query.Where, "        "))
+	}
+
+	sb.WriteString("        cursor = self.collection.find(query_filter)")
+
+	// Sort
+	if len(query.OrderBy) > 0 {
+		sb.WriteString(".sort([")
+		for i, o := range query.OrderBy {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			dir := "1"
+			if o.Descending {
+				dir = "-1"
+			}
+			sb.WriteString(fmt.Sprintf("('%s', %s)", ToSnakeCase(o.Field), dir))
+		}
+		sb.WriteString("])")
+	}
+
+	// Limit
+	if query.Limit != nil {
+		switch l := query.Limit.(type) {
+		case *parser.LiteralExpr:
+			if val, ok := l.Value.(int64); ok {
+				sb.WriteString(fmt.Sprintf(".limit(%d)", val))
+			}
+		case *parser.IdentExpr:
+			sb.WriteString(fmt.Sprintf(".limit(%s)", ToSnakeCase(l.Name)))
+		}
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString("        results = []\n")
+	sb.WriteString("        for doc in cursor:\n")
+	sb.WriteString("            doc.pop('_id', None)\n")
+	sb.WriteString(fmt.Sprintf("            results.append(%s(**doc))\n", entity.Name))
+	sb.WriteString("        return results\n\n")
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) generateMongoQueryFilter(expr parser.Expr, indent string) string {
+	// Simplified MongoDB filter generation
+	// For complex queries, this would need more sophisticated handling
+	var sb strings.Builder
+
+	switch e := expr.(type) {
+	case *parser.BinaryExpr:
+		left := ToSnakeCase(exprToFieldName(e.Left))
+		right := exprToValue(e.Right)
+
+		switch e.Op {
+		case "=":
+			sb.WriteString(fmt.Sprintf("%squery_filter['%s'] = %s\n", indent, left, right))
+		case ">=":
+			sb.WriteString(fmt.Sprintf("%squery_filter['%s'] = {'$gte': %s}\n", indent, left, right))
+		case "<=":
+			sb.WriteString(fmt.Sprintf("%squery_filter['%s'] = {'$lte': %s}\n", indent, left, right))
+		case ">":
+			sb.WriteString(fmt.Sprintf("%squery_filter['%s'] = {'$gt': %s}\n", indent, left, right))
+		case "<":
+			sb.WriteString(fmt.Sprintf("%squery_filter['%s'] = {'$lt': %s}\n", indent, left, right))
+		case "!=":
+			sb.WriteString(fmt.Sprintf("%squery_filter['%s'] = {'$ne': %s}\n", indent, left, right))
+		case "AND":
+			sb.WriteString(g.generateMongoQueryFilter(e.Left, indent))
+			sb.WriteString(g.generateMongoQueryFilter(e.Right, indent))
+		}
+	}
+
+	return sb.String()
+}
+
+func (g *MongoDBGenerator) pythonType(typeName string) string {
+	switch typeName {
+	case "string":
+		return "str"
+	case "int32", "int64", "timestamp":
+		return "int"
+	case "float", "double":
+		return "float"
+	case "bool":
+		return "bool"
+	case "bytes":
+		return "bytes"
+	default:
+		return typeName
+	}
+}
+
+func (g *MongoDBGenerator) pythonDefaultValue(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return fmt.Sprintf("'%s'", v)
+	case bool:
+		if v {
+			return "True"
+		}
+		return "False"
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%f", v)
+	default:
+		return "None"
+	}
+}
+
+// Helper functions
+
+func escapeJSONString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
+}
+
+func exprToFieldName(expr parser.Expr) string {
+	switch e := expr.(type) {
+	case *parser.IdentExpr:
+		return e.Name
+	default:
+		return ""
+	}
+}
+
+func exprToValue(expr parser.Expr) string {
+	switch e := expr.(type) {
+	case *parser.IdentExpr:
+		return ToSnakeCase(e.Name)
+	case *parser.LiteralExpr:
+		switch v := e.Value.(type) {
+		case string:
+			return fmt.Sprintf("'%s'", v)
+		case int64:
+			return fmt.Sprintf("%d", v)
+		case float64:
+			return fmt.Sprintf("%f", v)
+		case bool:
+			if v {
+				return "True"
+			}
+			return "False"
+		}
+	}
+	return "None"
+}

@@ -529,12 +529,18 @@ func (g *QtGenerator) generateQtQueryMethod(entity *parser.EntityDecl, query *pa
 	sb.WriteString(strings.Join(params, ", "))
 	sb.WriteString(")\n{\n")
 
+	// Build set of known parameter names
+	knownParams := make(map[string]bool)
+	for _, p := range query.Params {
+		knownParams[p.Name] = true
+	}
+
 	// Build SQL
 	var sqlParts []string
 	sqlParts = append(sqlParts, fmt.Sprintf("SELECT * FROM %s", tableName))
 
 	if query.Where != nil {
-		whereSQL, _ := ExprToSQLWithParams(query.Where, "")
+		whereSQL, _ := ExprToSQLWithKnownParams(query.Where, knownParams)
 		sqlParts = append(sqlParts, "WHERE "+whereSQL)
 	}
 

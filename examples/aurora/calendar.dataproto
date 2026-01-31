@@ -42,6 +42,10 @@ entity CalendarEvent {
     @length(max: 5000)
     notes: string?;
 
+    // Number of attachments (denormalized for quick access)
+    @default(0)
+    attachment_count: int32;
+
     // Query: Get events in a date range
     query eventsByDateRange(after: timestamp, before: timestamp) {
         where start_date >= after AND start_date < before
@@ -69,6 +73,56 @@ entity CalendarEvent {
     }
 }
 
+// Attachment entity for event files (flyers, PDFs, documents)
+// Stored separately to keep CalendarEvent lightweight
+@table("event_attachments")
+@backends(sqlite, postgres)
+entity EventAttachment {
+    // Primary key - unique attachment identifier
+    @pk
+    id: string;
+
+    // Foreign key to CalendarEvent
+    @indexed
+    @required
+    event_id: string;
+
+    // Original filename
+    @required
+    file_name: string;
+
+    // MIME type (e.g., "application/pdf", "image/jpeg")
+    @required
+    mime_type: string;
+
+    // File size in bytes
+    @required
+    size_bytes: int64;
+
+    // When the attachment was added
+    @required
+    created_at: timestamp;
+
+    // Binary data for small files (< 1MB inline, larger use storage_path)
+    // NULL if stored externally
+    @length(max: 1048576)  // 1MB limit for inline storage
+    data: bytes?;
+
+    // External storage path for large files
+    // Format: "attachments/{event_id}/{id}.{ext}"
+    storage_path: string?;
+
+    // Thumbnail for images/PDFs (optional, for quick preview)
+    @length(max: 65536)  // 64KB limit for thumbnails
+    thumbnail: bytes?;
+
+    // Query: Get all attachments for an event
+    query attachmentsForEvent(eventId: string) {
+        where event_id = eventId
+        order_by created_at ASC
+    }
+}
+
 // Request/response messages for gRPC
 service CalendarService {
     // Push events from client (iPhone) to server
@@ -82,4 +136,16 @@ service CalendarService {
 
     // Clear all events (for sync reset)
     rpc ClearEvents(ClearEventsRequest) returns (Result);
+
+    // Upload an attachment for an event
+    rpc UploadAttachment(stream AttachmentChunk) returns (UploadAttachmentResult);
+
+    // Get attachment metadata for an event
+    rpc GetAttachments(GetAttachmentsRequest) returns (stream EventAttachment);
+
+    // Download attachment data
+    rpc DownloadAttachment(DownloadAttachmentRequest) returns (stream AttachmentChunk);
+
+    // Delete an attachment
+    rpc DeleteAttachment(DeleteAttachmentRequest) returns (Result);
 }

@@ -243,37 +243,48 @@ func ExprToSQL(expr parser.Expr) string {
 
 // ExprToSQLWithParams converts an expression to parameterized SQL.
 // Returns the SQL string and a list of parameter names.
+// DEPRECATED: Use ExprToSQLWithKnownParams for accurate parameter detection.
 func ExprToSQLWithParams(expr parser.Expr, paramPrefix string) (string, []string) {
 	var params []string
-	sql := exprToSQLWithParamsInternal(expr, paramPrefix, &params)
+	sql := exprToSQLWithParamsInternal(expr, paramPrefix, &params, nil)
 	return sql, params
 }
 
-func exprToSQLWithParamsInternal(expr parser.Expr, prefix string, params *[]string) string {
+// ExprToSQLWithKnownParams converts an expression to parameterized SQL.
+// knownParams is a set of parameter names that should be converted to ? placeholders.
+// Other identifiers are treated as column names and output in snake_case.
+func ExprToSQLWithKnownParams(expr parser.Expr, knownParams map[string]bool) (string, []string) {
+	var params []string
+	sql := exprToSQLWithParamsInternal(expr, "", &params, knownParams)
+	return sql, params
+}
+
+func exprToSQLWithParamsInternal(expr parser.Expr, prefix string, params *[]string, knownParams map[string]bool) string {
 	switch e := expr.(type) {
 	case *parser.BinaryExpr:
-		left := exprToSQLWithParamsInternal(e.Left, prefix, params)
-		right := exprToSQLWithParamsInternal(e.Right, prefix, params)
+		left := exprToSQLWithParamsInternal(e.Left, prefix, params, knownParams)
+		right := exprToSQLWithParamsInternal(e.Right, prefix, params, knownParams)
 		return fmt.Sprintf("%s %s %s", left, e.Op, right)
 
 	case *parser.UnaryExpr:
-		operand := exprToSQLWithParamsInternal(e.Operand, prefix, params)
+		operand := exprToSQLWithParamsInternal(e.Operand, prefix, params, knownParams)
 		return fmt.Sprintf("%s %s", e.Op, operand)
 
 	case *parser.IsNullExpr:
-		operand := exprToSQLWithParamsInternal(e.Operand, prefix, params)
+		operand := exprToSQLWithParamsInternal(e.Operand, prefix, params, knownParams)
 		if e.Not {
 			return fmt.Sprintf("%s IS NOT NULL", operand)
 		}
 		return fmt.Sprintf("%s IS NULL", operand)
 
 	case *parser.IdentExpr:
-		// Check if this is a parameter reference (lowercase, matches query param)
-		if isLowerCamelCase(e.Name) {
+		// Check if this is a known parameter (from query signature)
+		if knownParams != nil && knownParams[e.Name] {
 			*params = append(*params, e.Name)
 			return "?"
 		}
-		return e.Name
+		// Otherwise, treat as column name - convert to snake_case
+		return ToSnakeCase(e.Name)
 
 	case *parser.LiteralExpr:
 		switch v := e.Value.(type) {
@@ -295,7 +306,7 @@ func exprToSQLWithParamsInternal(expr parser.Expr, prefix string, params *[]stri
 	case *parser.CallExpr:
 		var args []string
 		for _, arg := range e.Args {
-			args = append(args, exprToSQLWithParamsInternal(arg, prefix, params))
+			args = append(args, exprToSQLWithParamsInternal(arg, prefix, params, knownParams))
 		}
 		// Handle special functions
 		if e.Name == "NOW" {
@@ -304,18 +315,11 @@ func exprToSQLWithParamsInternal(expr parser.Expr, prefix string, params *[]stri
 		return fmt.Sprintf("%s(%s)", e.Name, strings.Join(args, ", "))
 
 	case *parser.ParenExpr:
-		return fmt.Sprintf("(%s)", exprToSQLWithParamsInternal(e.Inner, prefix, params))
+		return fmt.Sprintf("(%s)", exprToSQLWithParamsInternal(e.Inner, prefix, params, knownParams))
 
 	default:
 		return ""
 	}
-}
-
-func isLowerCamelCase(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	return unicode.IsLower(rune(s[0]))
 }
 
 // IndentLines indents each line of a string.

@@ -522,12 +522,18 @@ func (g *SwiftGenerator) generateSwiftQueryMethod(entity *parser.EntityDecl, que
 	sb.WriteString(strings.Join(params, ", "))
 	sb.WriteString(fmt.Sprintf(") throws -> [%s] {\n", entity.Name))
 
+	// Build set of known parameter names
+	knownParams := make(map[string]bool)
+	for _, p := range query.Params {
+		knownParams[p.Name] = true
+	}
+
 	// Build SQL
 	var sqlParts []string
 	sqlParts = append(sqlParts, fmt.Sprintf("SELECT * FROM %s", tableName))
 
 	if query.Where != nil {
-		whereSQL, _ := ExprToSQLWithParams(query.Where, "")
+		whereSQL, _ := ExprToSQLWithKnownParams(query.Where, knownParams)
 		sqlParts = append(sqlParts, "WHERE "+whereSQL)
 	}
 
