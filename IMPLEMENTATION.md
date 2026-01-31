@@ -40,7 +40,8 @@ DataProto is a unified schema protocol that extends gRPC/protobuf axioms to incl
 ### Phase 4: Multi-Backend
 | Task | Status | File |
 |------|--------|------|
-| Postgres DDL generator | ⬜ TODO | `compiler/internal/codegen/sql_postgres.go` |
+| Postgres DDL generator | ✅ DONE | `compiler/internal/codegen/sql_postgres.go` |
+| MongoDB generator | ✅ DONE | `compiler/internal/codegen/mongodb.go` |
 | Ceramic model generator | ⬜ TODO | `compiler/internal/codegen/ceramic.go` |
 | Migration differ | ⬜ TODO | `compiler/internal/migration/differ.go` |
 | Migration runner | ⬜ TODO | `runtime/*/migration.*` |
@@ -48,12 +49,14 @@ DataProto is a unified schema protocol that extends gRPC/protobuf axioms to incl
 ### Phase 5: Multi-Language Code Generation
 | Task | Status | File |
 |------|--------|------|
-| Java codegen | ✅ DONE | `compiler/internal/codegen/java.go` |
-| Swift codegen | ✅ DONE | `compiler/internal/codegen/swift.go` |
+| Java codegen (server) | ✅ DONE | `compiler/internal/codegen/java.go` |
+| Swift codegen (iOS client) | ✅ DONE | `compiler/internal/codegen/swift.go` |
+| Kotlin codegen (Android client) | ✅ DONE | `compiler/internal/codegen/kotlin.go` |
 | Python codegen | ✅ DONE | `compiler/internal/codegen/python.go` |
 | Qt/C++ codegen | ✅ DONE | `compiler/internal/codegen/qt.go` |
 | Java runtime | ✅ DONE | `runtime/java/` |
 | Swift runtime | ⬜ TODO | `runtime/swift/` |
+| Kotlin runtime | ⬜ TODO | `runtime/kotlin/` |
 | Python runtime | ⬜ TODO | `runtime/python/` |
 | Qt runtime | ⬜ TODO | `runtime/qt/` |
 
@@ -64,6 +67,46 @@ DataProto is a unified schema protocol that extends gRPC/protobuf axioms to incl
 | LSP implementation | ⬜ TODO | `compiler/internal/lsp/` |
 | Documentation site | ⬜ TODO | External |
 | Example Aurora schemas | ✅ DONE | `examples/aurora/` |
+
+---
+
+## Architecture: Client/Server Roles
+
+DataProto generates different code depending on the target's role:
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   iOS (Swift)   │     │ Android (Kotlin)│     │   Other Clients │
+│   gRPC Client   │     │   gRPC Client   │     │   gRPC Client   │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         └───────────────────────┼───────────────────────┘
+                                 │ gRPC (port 50051)
+                                 ▼
+                    ┌─────────────────────────┐
+                    │   Java Server (Aurora)  │
+                    │   - SQL Repositories    │
+                    │   - Direct DB Access    │
+                    │   - Single Source Truth │
+                    └────────────┬────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              ▼                  ▼                  ▼
+         ┌─────────┐       ┌──────────┐       ┌─────────┐
+         │ SQLite  │       │ Postgres │       │ MongoDB │
+         │(device) │       │ (family) │       │  (doc)  │
+         └─────────┘       └──────────┘       └─────────┘
+```
+
+| Language | Role | Generated Code |
+|----------|------|----------------|
+| **Java** | Server | SQL repositories, mappers, gRPC services |
+| **Swift** | iOS Client | Data classes, proto mappers, gRPC client |
+| **Kotlin** | Android Client | Data classes, proto mappers, gRPC client |
+| **Python** | Scripts/Tools | Data classes, SQL repositories |
+| **Qt/C++** | Desktop Client | QObject classes, SQL repositories |
+
+**Key principle:** Only the Java server has direct database access. Mobile clients communicate via gRPC.
 
 ---
 
@@ -120,6 +163,47 @@ class CalendarEventRepository(BaseRepository):
     def events_by_date_range(self, after: int, before: int) -> List[CalendarEvent]:
         sql = "SELECT * FROM calendar_events WHERE start_date >= ? AND start_date < ? ORDER BY start_date ASC"
         # ...
+```
+
+### Kotlin (Android gRPC Client)
+
+**CalendarEvent.kt** - Data class:
+```kotlin
+@Serializable
+data class CalendarEvent(
+    val id: String,
+    val title: String,
+    @SerialName("start_date")
+    val startDate: Long,
+    @SerialName("end_date")
+    val endDate: Long? = null,
+    @SerialName("is_all_day")
+    val isAllDay: Boolean = false,
+    // ...
+)
+```
+
+**CalendarServiceClient.kt** - gRPC client with coroutines:
+```kotlin
+class CalendarServiceClient(
+    private val host: String = "localhost",
+    private val port: Int = 50051
+) {
+    private val stub: CalendarServiceGrpcKt.CalendarServiceCoroutineStub by lazy {
+        CalendarServiceGrpcKt.CalendarServiceCoroutineStub(channel)
+    }
+
+    suspend fun pushEvents(items: List<CalendarEvent>): PushResult {
+        return withContext(Dispatchers.IO) {
+            val protos = CalendarEventMapper.toProtoList(items)
+            stub.pushEvents(protos.asFlow())
+        }
+    }
+
+    fun getEvents(request: GetEventsRequest): Flow<CalendarEvent> {
+        return stub.getEvents(request).map { CalendarEventMapper.fromProto(it) }
+    }
+}
 ```
 
 ### Qt/C++ (from CalendarEvent entity)
@@ -262,17 +346,17 @@ service CalendarService {
 
 ### Type System
 
-| DataProto Type | Proto Type | SQLite Type | Postgres Type | Java Type | Swift Type |
-|----------------|------------|-------------|---------------|-----------|------------|
-| `string` | `string` | `TEXT` | `TEXT` | `String` | `String` |
-| `int32` | `int32` | `INTEGER` | `INTEGER` | `int` | `Int32` |
-| `int64` | `int64` | `INTEGER` | `BIGINT` | `long` | `Int64` |
-| `float` | `float` | `REAL` | `REAL` | `float` | `Float` |
-| `double` | `double` | `REAL` | `DOUBLE PRECISION` | `double` | `Double` |
-| `bool` | `bool` | `INTEGER` | `BOOLEAN` | `boolean` | `Bool` |
-| `bytes` | `bytes` | `BLOB` | `BYTEA` | `byte[]` | `Data` |
-| `timestamp` | `int64` | `INTEGER` | `BIGINT` | `long` | `Int64` |
-| `T?` | `optional T` | nullable | nullable | `@Nullable T` | `T?` |
+| DataProto Type | Proto Type | SQLite Type | Postgres Type | Java Type | Swift Type | Kotlin Type |
+|----------------|------------|-------------|---------------|-----------|------------|-------------|
+| `string` | `string` | `TEXT` | `TEXT` | `String` | `String` | `String` |
+| `int32` | `int32` | `INTEGER` | `INTEGER` | `int` | `Int32` | `Int` |
+| `int64` | `int64` | `INTEGER` | `BIGINT` | `long` | `Int64` | `Long` |
+| `float` | `float` | `REAL` | `REAL` | `float` | `Float` | `Float` |
+| `double` | `double` | `REAL` | `DOUBLE PRECISION` | `double` | `Double` | `Double` |
+| `bool` | `bool` | `INTEGER` | `BOOLEAN` | `boolean` | `Bool` | `Boolean` |
+| `bytes` | `bytes` | `BLOB` | `BYTEA` | `byte[]` | `Data` | `ByteArray` |
+| `timestamp` | `int64` | `INTEGER` | `BIGINT` | `long` | `Int64` | `Long` |
+| `T?` | `optional T` | nullable | nullable | `@Nullable T` | `T?` | `T?` |
 
 ### Annotations Reference
 
@@ -487,9 +571,12 @@ dataproto/
 │           ├── proto.go       # Proto file generator
 │           ├── sql_sqlite.go  # SQLite DDL generator
 │           ├── sql_postgres.go# Postgres DDL generator
-│           ├── java.go        # Java codegen
-│           ├── swift.go       # Swift codegen
-│           └── python.go      # Python codegen
+│           ├── mongodb.go     # MongoDB JSON Schema + setup
+│           ├── java.go        # Java codegen (server)
+│           ├── kotlin.go      # Kotlin codegen (Android client)
+│           ├── swift.go       # Swift codegen (iOS client)
+│           ├── python.go      # Python codegen
+│           └── qt.go          # Qt/C++ codegen
 │
 ├── runtime/
 │   ├── java/
@@ -675,19 +762,20 @@ Generated files:
    - Block destructive changes (delete/rename/type change)
    - Foundation columns are immutable
 
-**Medium Priority (Multi-Platform):**
-4. **Postgres DDL generator** → `sql_postgres.go` (family hubs)
-5. **MongoDB generator** → document store option
-6. **Kotlin codegen** → Android support
+**Medium Priority (Completed):**
+- [x] **Postgres DDL generator** → `sql_postgres.go` (family hubs)
+- [x] **MongoDB generator** → JSON Schema + setup.js + Python repos
+- [x] **Kotlin codegen** → Android gRPC client (like Swift for iOS)
+- [x] **EventAttachment entity** → bytes fields for files/PDFs
 
 **Future (Decentralized Layer):**
-7. **CID Generation** → content addressing for P2P sync
-8. **P2P Sync Protocol** → mesh network foundation
+4. **CID Generation** → content addressing for P2P sync
+5. **P2P Sync Protocol** → mesh network foundation
 
 **Lower Priority:**
-9. **Certificate Authority** → `certification/ca/sign.go`
-10. **Swift/Python/Qt Runtimes** → certification checks
-11. **VS Code Extension** → syntax highlighting + LSP
+6. **Certificate Authority** → `certification/ca/sign.go`
+7. **Swift/Kotlin/Python/Qt Runtimes** → certification checks
+8. **VS Code Extension** → syntax highlighting + LSP
 
 ---
 
